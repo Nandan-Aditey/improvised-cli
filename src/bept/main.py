@@ -1,34 +1,34 @@
 import os
-from trogon import tui
-import rich_click as click
-from beaupy import select_multiple, confirm
-from rich.console import Console
+import shutil
 
-from bept.analysis.bept_csv_make import csv_make, bept_make
-from bept.analysis.opt_files.xyz import xyz_make
+import rich_click as click
+from beaupy import confirm, select_multiple
+from rich.console import Console
+from trogon import tui
+
+from bept.analysis.bept_csv_make import bept_make, csv_make
 from bept.analysis.opt_files.cube import cube_make
-from bept.auto.auto_execute import p_exec, apbs_exec
+from bept.analysis.opt_files.surface_pdb_sasa import calc_sasa, get_surface_resi
+from bept.analysis.opt_files.xyz import xyz_make
+from bept.auto.auto_execute import apbs_exec, p_exec
 from bept.auto.auto_file import file_runner
-from bept.history.his_main import history_clear, history_choose
-from bept.history.cache_apbs import (
-    CACHE_DIR as APBS_CACHE_DIR,
-    clear_apbs_cache as apbs_cache_clear,
-)
-from bept.history.cache_vnr import cache_view, restore_selected_cache
-from bept.validator import (
-    validate_pdb2pqr,
-    validate_apbs,
-    validate_dx,
-    validate_pqr,
-    validate_into,
-    validate_toin,
-)
+from bept.docs.docs_viewer import run_docs_viewer
+from bept.gen.app_runner import apbs_gen, pdb2pqr_gen
 from bept.gen.pdb2pqr_beaupy import inter_pqr_gen_beaupy
 from bept.gen.toml_in_converter import in_toml, toml_in
-from bept.gen.app_runner import apbs_gen
-from bept.gen.app_runner import pdb2pqr_gen
+from bept.history.cache_apbs import CACHE_DIR as APBS_CACHE_DIR
+from bept.history.cache_apbs import clear_apbs_cache as apbs_cache_clear
+from bept.history.cache_vnr import cache_view, restore_selected_cache
+from bept.history.his_main import history_choose, history_clear
 from bept.pymol.mol_ext import pymol_main
-from bept.docs.docs_viewer import run_docs_viewer
+from bept.validator import (
+    validate_apbs,
+    validate_dx,
+    validate_into,
+    validate_pdb2pqr,
+    validate_pqr,
+    validate_toin,
+)
 
 CONSOLE = Console()
 
@@ -173,18 +173,24 @@ def gen(pdb2pqr, no_tui, apbs, in_to_toml, toml_to_in):
                 "Successfully generated APBS input files along with respective toml files.",
                 style="green",
             )
-            # to delete the output toml files
-            prompt = "Do you want to delete the output toml files?"
-            if confirm(prompt):
-                try:
-                    os.remove(in_path_toml)
-                    os.remove(out_path_toml)
-                    CONSOLE.print("Deleted the output toml files.", style="green")
-                except Exception as e:
-                    CONSOLE.print(
-                        f"Error in deleting the output toml files. Error: {e}",
-                        style="red",
-                    )
+        # Create .bept directory if it doesn't exist
+        bept_dir = os.path.join(os.path.dirname(out_path_toml), ".bept")
+        os.makedirs(bept_dir, exist_ok=True)
+
+        # Define new paths
+        bept_in_path_toml = os.path.join(bept_dir, os.path.basename(in_path_toml))
+        bept_out_path_toml = os.path.join(bept_dir, os.path.basename(out_path_toml))
+
+    # Move files to .bept directory
+    try:
+        shutil.move(in_path_toml, bept_in_path_toml)
+        shutil.move(out_path_toml, bept_out_path_toml)
+        CONSOLE.print("Moved the toml files to the .bept directory.", style="yellow")
+    except Exception as e:
+        CONSOLE.print(
+            f"Error in moving the toml files to the .bept directory. Error: {e}",
+            style="red",
+        )
 
     # Exclusively convert in to toml
     if in_to_toml:
@@ -233,6 +239,13 @@ def gen(pdb2pqr, no_tui, apbs, in_to_toml, toml_to_in):
     help="Input PQR file path.",
 )
 @click.option(
+    "--pdb",
+    "-p",
+    type=click.Path(exists=True),
+    callback=validate_pdb2pqr,
+    help="Input PDB file path. Recommended for generating surface residues and calculating SASA.",
+)
+@click.option(
     "--interactive",
     "-i",
     is_flag=True,
@@ -250,7 +263,7 @@ def gen(pdb2pqr, no_tui, apbs, in_to_toml, toml_to_in):
     type=click.Path(),
     help="Output directory to save the files. Default: current directory.",
 )
-def out(interactive, dx, pqr, all_types, out_dir):
+def out(interactive, dx, pqr, pdb, all_types, out_dir):
     """
     Generate output files including PQR, Potential DX and default `.bept` and `<protein>_bept.csv` file.
     Run `bept gen --help` for more information.
@@ -263,6 +276,8 @@ def out(interactive, dx, pqr, all_types, out_dir):
     file_options = [
         "cube: Gaussian .cube file",
         "xyz: .xyz format for input protein",
+        "Surface Residues with Potential",
+        "Calculate and print SASA value for protein",
         "Cancel and generate default",  # Always last option
     ]
     types = ["bept: .bept file containing all data"]
@@ -288,21 +303,29 @@ def out(interactive, dx, pqr, all_types, out_dir):
 
     bept_csv, err_csv = csv_make(input_pqr, input_dx, output_dir)
     bept_main_path, err_bept = bept_make(input_pqr, input_dx, bept_csv, output_dir)
+
+    if not pdb and (file_options[2] in types or file_options[3] in types):
+        protein_path = input(
+            "For calculating the surface residues and SASA, we need the PDB file path. Please provide the path: "
+        )
+    else:
+        protein_path = pdb
+
     if err_csv or err_bept:
         CONSOLE.print("Error in generating BEPT default files.", style="red")
         return 0
 
     err_xyz = False
 
-    def if_err_file(err, name: str, destination: str):
+    def if_err_file(err, name: str, destination: str) -> bool:
         """Common output if error in generating file."""
         if err:
             CONSOLE.print(f"Error in generating {name} file.", style="red")
             return True
-        else:
-            CONSOLE.print(
-                f"Successfully generated {name} file at: {destination}", style="green"
-            )
+        CONSOLE.print(
+            f"Successfully generated {name} file at: {destination}", style="green"
+        )
+        return False
 
     # TODO: Add more type of files here
     for _typ in types:
@@ -316,6 +339,23 @@ def out(interactive, dx, pqr, all_types, out_dir):
         if "xyz" in str(_typ):
             destination_xyz, err_xyz = xyz_make(bept_csv, bept_main_path, output_dir)
             if_err_file(err_xyz, "xyz", destination_xyz)
+
+        if "Surface" in str(_typ) or "SASA" in str(_typ):
+            if "SASA" in str(_typ):
+                calc_sasa(protein_path)
+
+            else:
+                destination_surf, err_surf = get_surface_resi(
+                    protein_path, bept_csv, output_dir
+                )
+                if_err_file(
+                    err_surf, "Surface Residues with Potential", destination_surf
+                )
+                if not err_surf:
+                    CONSOLE.print(
+                        "Note: The surface residues CSV file has been generated and stored in .bept directory.",
+                        style="yellow",
+                    )
 
     return 1
 

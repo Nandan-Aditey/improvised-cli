@@ -1,11 +1,11 @@
 read
-    mol pqr 7y6i.pqr
+    mol pqr 1l2y.pqr
 end
 elec 
     mg-auto
-    dime 193 225 225
-    cglen 129.3037 161.4983 152.0684
-    fglen 96.0610 114.9990 109.4520
+    dime 97 65 65
+    cglen 42.9505 38.8433 27.8477
+    fglen 42.9505 38.8433 27.8477
     cgcent mol 1
     fgcent mol 1
     mol 1
@@ -21,7 +21,7 @@ elec
     temp 298.15
     calcenergy total
     calcforce no
-    write pot dx 7y6i.pqr
+    write pot dx 1l2y.pqr
 end
 print elecEnergy 1 end
 quit
